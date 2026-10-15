@@ -187,6 +187,21 @@ export class ProvidersPage extends BasePage {
   }
 
   /**
+   * Open a new GitHub Copilot key on the Sign in with GitHub tab, fill the client ID, and start
+   * the device flow. The caller mocks the gateway's sign-in endpoints and saves the key.
+   */
+  async startCopilotSignIn(config: { name: string; clientId: string }): Promise<void> {
+    await this.dismissToasts()
+    await this.addKeyBtn.click()
+    await expect(this.keyForm).toBeVisible()
+
+    await this.page.getByLabel('Name').fill(config.name)
+    await this.page.getByTestId('apikey-copilot-sign-in-tab').click()
+    await this.page.getByTestId('key-input-copilot-oauth-client-id').fill(config.clientId)
+    await this.page.getByTestId('copilot-sign-in-button').click()
+  }
+
+  /**
    * Add a key that mints its bearer with the RFC 7523 JWT bearer grant.
    * Only fields the caller sets are filled, so the form's defaults (RS256, subject = issuer,
    * 300s lifetime) are exercised when they are left out.

@@ -33,6 +33,7 @@ import (
 	"github.com/maximhq/bifrost/framework"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
+	"github.com/maximhq/bifrost/framework/copilotsignin"
 	"github.com/maximhq/bifrost/framework/encrypt"
 	"github.com/maximhq/bifrost/framework/envutils"
 	"github.com/maximhq/bifrost/framework/featureflags"
@@ -760,6 +761,10 @@ type Config struct {
 	OAuthProvider           *oauth2.OAuth2Provider
 	OAuthTokenRefreshWorker *oauth2.OAuthTokenRefreshWorker
 	OAuthSweepWorker        *oauth2.PerUserOAuthSweepWorker
+
+	// GithubCopilotSignIn holds "Sign in with GitHub" tokens for GitHub Copilot keys. Nil
+	// without a config store, since the tokens must survive restarts.
+	GithubCopilotSignIn *copilotsignin.Manager
 
 	// MCPHeadersProvider backs MCPAuthTypePerUserHeaders credential storage.
 	// Constructed alongside OAuthProvider and passed into the Bifrost core
@@ -6626,6 +6631,9 @@ func initFrameworkConfig(ctx context.Context, config *Config, configData *Config
 
 	// Initialize OAuth provider
 	config.OAuthProvider = oauth2.NewOAuth2Provider(config.ConfigStore, logger)
+	if config.ConfigStore != nil {
+		config.GithubCopilotSignIn = copilotsignin.New(config.ConfigStore, logger, config.hasGithubCopilotKey)
+	}
 	// Initialize per-user-headers credential provider. Storage parallel of
 	// OAuthProvider for MCPAuthTypePerUserHeaders clients.
 	config.MCPHeadersProvider = mcp_headers.NewProvider(config.ConfigStore, logger)
@@ -8993,13 +9001,7 @@ func (c *Config) GetAllKeys() ([]configstoreTables.TableKey, error) {
 				configStoreKey.DatabricksKeyConfig = &cfg
 			}
 			if key.GithubCopilotKeyConfig != nil {
-				cfg := *key.GithubCopilotKeyConfig // safe copy
-				cfg.AppID = *cfg.AppID.Redacted()
-				cfg.InstallationID = *cfg.InstallationID.Redacted()
-				cfg.RepositoryID = *cfg.RepositoryID.Redacted()
-				cfg.PrivateKey = *cfg.PrivateKey.Redacted()
-				cfg.GithubDomain = *cfg.GithubDomain.Redacted()
-				configStoreKey.GithubCopilotKeyConfig = &cfg
+				configStoreKey.GithubCopilotKeyConfig = key.GithubCopilotKeyConfig
 			}
 			if key.CloudflareKeyConfig != nil {
 				cfg := *key.CloudflareKeyConfig // safe copy
@@ -10665,4 +10667,18 @@ func (c *Config) GetA2APrivateAllowlist() []string {
 		return nil
 	}
 	return slices.Clone(c.ClientConfig.A2APrivateAllowlist)
+}
+
+// hasGithubCopilotKey reports whether a GitHub Copilot key with this ID is saved.
+func (c *Config) hasGithubCopilotKey(keyID string) bool {
+	provider, err := c.GetProviderConfigRaw(schemas.GithubCopilot)
+	if err != nil {
+		return false
+	}
+	for i := range provider.Keys {
+		if provider.Keys[i].ID == keyID {
+			return true
+		}
+	}
+	return false
 }

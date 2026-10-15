@@ -72,3 +72,22 @@ func chatRequestHasImageContent(request *schemas.BifrostChatRequest) bool {
 	}
 	return false
 }
+
+// responsesRequestHasImageContent is the Responses API counterpart of
+// chatRequestHasImageContent.
+func responsesRequestHasImageContent(request *schemas.BifrostResponsesRequest) bool {
+	if request == nil {
+		return false
+	}
+	for _, message := range request.Input {
+		if message.Content == nil {
+			continue
+		}
+		for _, block := range message.Content.ContentBlocks {
+			if block.Type == schemas.ResponsesInputMessageContentBlockTypeImage {
+				return true
+			}
+		}
+	}
+	return false
+}

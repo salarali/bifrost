@@ -7319,36 +7319,14 @@
             "github_copilot_key_config": {
               "type": "object",
               "properties": {
-                "app_id": {
+                "oauth_client_id": {
                   "type": "string",
                   "minLength": 1,
-                  "description": "GitHub App ID or Client ID; the App JWT issuer (can use env. prefix)"
-                },
-                "installation_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Installation to mint tokens for, digits only (can use env. prefix)"
-                },
-                "repository_id": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "Repository the installation token is scoped to, digits only (can use env. prefix)"
-                },
-                "private_key": {
-                  "type": "string",
-                  "minLength": 1,
-                  "description": "GitHub App private key in PKCS#1 or PKCS#8 PEM form (can use env. prefix)"
-                },
-                "github_domain": {
-                  "type": "string",
-                  "description": "GitHub Enterprise domain, e.g. acme.ghe.com. Leave unset for github.com."
+                  "description": "Client ID of a GitHub App with Device Flow enabled, for Sign in with GitHub. Sign in from the key in the Bifrost UI, which stores and refreshes the user token (can use env. prefix)"
                 }
               },
               "required": [
-                "app_id",
-                "installation_id",
-                "repository_id",
-                "private_key"
+                "oauth_client_id"
               ],
               "additionalProperties": false
             }

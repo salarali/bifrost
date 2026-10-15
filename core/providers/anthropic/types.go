@@ -432,6 +432,19 @@ var ProviderFeatures = map[schemas.ModelProvider]ProviderFeatureSupport{
 	// through the capability datasheet.
 	schemas.VLLM: {},
 	schemas.SGL:  {},
+	// GitHub Copilot's /v1/messages endpoint, used for Claude models. GitHub documents no
+	// feature list, so the cells are what the first-party VS Code Copilot Chat client sends
+	// (microsoft/vscode-copilot-chat, src/platform/endpoint/node/chatEndpoint.ts and
+	// messagesApi.ts): the interleaved-thinking, context-management and advanced-tool-use
+	// betas, a context_management body, and tool_search_tool_regex with defer_loading.
+	// Everything else is undocumented and stays off, fail-closed.
+	schemas.GithubCopilot: {
+		ToolSearch:             true,
+		AdvancedToolUse:        true,
+		ContextEditing:         true,
+		ContextManagementField: true,
+		InterleavedThinking:    true,
+	},
 }
 
 // ==================== REQUEST TYPES ====================

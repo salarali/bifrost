@@ -518,7 +518,6 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"clear_plugin_config_hashes"}, run: migrationClearPluginConfigHashes},
 	{IDs: []string{"add_mcp_oauth_token_status_reason_column"}, run: migrationAddMCPOauthTokenStatusReasonColumn},
 	{IDs: []string{"add_databricks_key_config_columns"}, run: migrationAddDatabricksKeyConfigColumns},
-	{IDs: []string{"add_github_copilot_config_columns"}, run: migrationAddGithubCopilotConfigColumns},
 	{IDs: []string{"add_oauth_key_config_columns"}, run: migrationAddOAuthKeyConfigColumns},
 	{IDs: []string{"add_mcp_client_endpoint_slug"}, run: migrationAddMCPClientEndpointSlug},
 	{IDs: []string{"add_allow_all_providers_to_virtual_key"}, run: migrationAddAllowAllProvidersToVirtualKey},
@@ -579,6 +578,7 @@ var configstoreMigrationSteps = []migrationStep{
 	{IDs: []string{"add_virtual_key_metadata_column"}, run: migrationAddVirtualKeyMetadataColumn},
 	{IDs: []string{"add_a2a_private_allowlist_column"}, run: migrationAddA2APrivateAllowlistColumn},
 	{IDs: []string{"add_agent_destination_policy_columns"}, run: migrationAddAgentDestinationPolicyColumns},
+	{IDs: []string{"add_github_copilot_sign_in"}, run: migrationAddGithubCopilotSignIn},
 }
 
 // warpLogEmbeddingColumns are the semantic-search configuration columns added
@@ -14137,20 +14137,11 @@ func migrationAddDatabricksKeyConfigColumns(ctx context.Context, db *gorm.DB, lo
 	return nil
 }
 
-// githubCopilotConfigColumns are the GitHub App credential columns on the key table.
-var githubCopilotConfigColumns = []string{
-	"github_copilot_app_id",
-	"github_copilot_installation_id",
-	"github_copilot_repository_id",
-	"github_copilot_private_key",
-	"github_copilot_github_domain",
-}
-
-// migrationAddGithubCopilotConfigColumns adds the GitHub App credential columns to the key
-// table. There is nothing to backfill: github-copilot is a new provider, so no existing row
-// can carry these values.
-func migrationAddGithubCopilotConfigColumns(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
-	migrationName := "add_github_copilot_config_columns"
+// migrationAddGithubCopilotSignIn adds the "Sign in with GitHub" client ID column to the key
+// table and the table that holds each key's signed-in user token. Both are new, so there is
+// nothing to backfill.
+func migrationAddGithubCopilotSignIn(ctx context.Context, db *gorm.DB, logger schemas.Logger) error {
+	migrationName := "add_github_copilot_sign_in"
 	logger.Info("[configstore] starting migration %s", migrationName)
 	defer logger.Info("[configstore] finished migration %s", migrationName)
 
@@ -14158,29 +14149,27 @@ func migrationAddGithubCopilotConfigColumns(ctx context.Context, db *gorm.DB, lo
 		ID: migrationName,
 		Migrate: func(tx *gorm.DB) error {
 			tx = tx.WithContext(ctx)
-			for _, column := range githubCopilotConfigColumns {
-				if err := addColumnIfNotExists(tx, logger, &tables.TableKey{}, column); err != nil {
-					return err
+			if err := addColumnIfNotExists(tx, logger, &tables.TableKey{}, "github_copilot_oauth_client_id"); err != nil {
+				return err
+			}
+			if mg := tx.Migrator(); !mg.HasTable(&tables.TableGithubCopilotSignIn{}) {
+				if err := mg.CreateTable(&tables.TableGithubCopilotSignIn{}); err != nil {
+					return fmt.Errorf("create github_copilot_sign_ins table: %w", err)
 				}
 			}
 			return nil
 		},
-		Rollback: rollbackGithubCopilotConfigColumns,
+		// Not rolled back: dropping the table would sign every key out, and an older binary
+		// ignores both the column and the table.
+		Rollback: func(*gorm.DB) error {
+			return fmt.Errorf("add_github_copilot_sign_in is non-rollbackable: dropping it would delete every stored GitHub sign-in; older binaries safely ignore the column and table")
+		},
 	}})
 
 	if err := m.Migrate(); err != nil {
 		return fmt.Errorf("error running %s migration: %w", migrationName, err)
 	}
 	return nil
-}
-
-// rollbackGithubCopilotConfigColumns refuses rather than dropping, unlike most column
-// migrations in this file. github_copilot_private_key holds a GitHub App private key, which
-// GitHub lets you download exactly once: dropping it does not lose a recomputable config
-// value, it forces the operator to generate a new key on GitHub and re-install the App. The
-// columns are additive, so an older binary ignores them and there is nothing to undo.
-func rollbackGithubCopilotConfigColumns(*gorm.DB) error {
-	return fmt.Errorf("add_github_copilot_config_columns is non-rollbackable: dropping the github_copilot_* columns would permanently delete every stored GitHub App private key, which GitHub only issues once and cannot re-supply; the columns are additive and older binaries safely ignore them")
 }
 
 // oauthKeyConfigColumns are the oauth_key_config columns on the key table.

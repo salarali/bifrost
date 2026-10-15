@@ -902,14 +902,8 @@ func (p *ProviderConfig) Redacted() *ProviderConfig {
 		}
 
 		if key.GithubCopilotKeyConfig != nil {
-			// The private key is the whole credential, so it is redacted like any other
-			// secret rather than surfaced in a config read.
 			redactedConfig.Keys[i].GithubCopilotKeyConfig = &schemas.GithubCopilotKeyConfig{
-				AppID:          *key.GithubCopilotKeyConfig.AppID.Redacted(),
-				InstallationID: *key.GithubCopilotKeyConfig.InstallationID.Redacted(),
-				RepositoryID:   *key.GithubCopilotKeyConfig.RepositoryID.Redacted(),
-				PrivateKey:     *key.GithubCopilotKeyConfig.PrivateKey.Redacted(),
-				GithubDomain:   *key.GithubCopilotKeyConfig.GithubDomain.Redacted(),
+				OAuthClientID: *key.GithubCopilotKeyConfig.OAuthClientID.Redacted(),
 			}
 		}
 

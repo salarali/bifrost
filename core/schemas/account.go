@@ -1182,23 +1182,16 @@ func (c *OAuthKeyConfig) Validate() error {
 	return nil
 }
 
-// GithubCopilotKeyConfig holds GitHub App credentials for server-to-server Copilot access.
-//
-// A GitHub App carrying the "Copilot Requests" permission mints short-lived installation
-// tokens, and Copilot usage is billed to the account that owns the installation. No
-// individual Copilot seat is involved, which is what makes this the correct auth mode for
-// a shared gateway.
-//
-// The organization must also have the "Allow use of Copilot CLI billed to the
-// organization" policy enabled, and the installation needs All repositories access.
-//
-// See https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/server-to-server-tokens
+// GithubCopilotKeyConfig selects "Sign in with GitHub" for a GitHub Copilot key: an operator
+// signs in once through GitHub's device flow, and the gateway stores and refreshes the user
+// token. Keys that carry a GitHub or Copilot token in Key.Value need no config.
 type GithubCopilotKeyConfig struct {
-	AppID          SecretVar `json:"app_id"`                  // GitHub App ID or Client ID; the App JWT issuer (required)
-	InstallationID SecretVar `json:"installation_id"`         // Installation to mint tokens for; digits only (required)
-	RepositoryID   SecretVar `json:"repository_id"`           // Repository the installation token is scoped to; digits only (required)
-	PrivateKey     SecretVar `json:"private_key"`             // GitHub App private key, PKCS#1 or PKCS#8 PEM (required)
-	GithubDomain   SecretVar `json:"github_domain,omitempty"` // GitHub Enterprise domain, e.g. "acme.ghe.com". Empty means github.com.
+	OAuthClientID SecretVar `json:"oauth_client_id,omitempty"` // Client ID of the GitHub App used to sign in
+}
+
+// UsesSignIn reports whether the key authenticates through "Sign in with GitHub".
+func (c *GithubCopilotKeyConfig) UsesSignIn() bool {
+	return c != nil && strings.TrimSpace(c.OAuthClientID.GetValue()) != ""
 }
 
 // Account defines the interface for managing provider accounts and their configurations.

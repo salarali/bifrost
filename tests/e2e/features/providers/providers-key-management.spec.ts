@@ -139,4 +139,100 @@ test.describe("Provider Key Management", () => {
 
     await providersPage.keyCancelBtn.click();
   });
+
+  test.describe("GitHub Copilot sign in with GitHub", () => {
+    let addedCopilotProvider = false;
+
+    test.beforeEach(async ({ providersPage }) => {
+      if (!(await providersPage.providerExists("github-copilot"))) {
+        await providersPage.addKnownProviderFromDropdown("github-copilot");
+        addedCopilotProvider = true;
+      }
+      await providersPage.selectProvider("github-copilot");
+    });
+
+    test.afterAll(async ({ request }) => {
+      if (addedCopilotProvider) {
+        await request.delete("/api/providers/github-copilot");
+      }
+    });
+
+    // GitHub is mocked at the gateway's sign-in endpoints: the device flow itself needs a person
+    // to approve on github.com. This pins the form side: the code is shown, polling finishes,
+    // the signed-in state appears, and the key saves with only a client ID.
+    test("should sign in with the device flow and save the key with only a client ID", async ({
+      providersPage,
+      request,
+    }) => {
+      const page = providersPage.page;
+      let signedIn = false;
+      let pollClientId = "";
+
+      await page.route("**/api/providers/github-copilot/keys/*/sign-in/poll", async (route) => {
+        pollClientId = route.request().postDataJSON().client_id;
+        signedIn = true;
+        await route.fulfill({ json: { status: "complete", login: "octocat" } });
+      });
+      await page.route("**/api/providers/github-copilot/keys/*/sign-in", async (route) => {
+        if (route.request().method() === "POST") {
+          await route.fulfill({
+            json: {
+              device_code: "dc_e2e",
+              user_code: "WDJB-MJHT",
+              verification_uri: "https://github.com/login/device",
+              expires_in: 900,
+              interval: 1,
+            },
+          });
+          return;
+        }
+        await route.fulfill({
+          json: signedIn ? { signed_in: true, status: "active", login: "octocat" } : { signed_in: false },
+        });
+      });
+
+      const keyName = `Copilot-Sign-In-${Date.now()}`;
+      managementKeys.push(keyName);
+      await providersPage.startCopilotSignIn({ name: keyName, clientId: "Iv23liE2eClient" });
+
+      await expect(page.getByTestId("copilot-sign-in-user-code")).toHaveText("WDJB-MJHT");
+      await expect(page.getByTestId("copilot-sign-in-verification-link")).toHaveAttribute(
+        "href",
+        "https://github.com/login/device",
+      );
+      await expect(page.getByTestId("copilot-sign-in-status")).toContainText("Signed in as @octocat", { timeout: 10000 });
+      expect(pollClientId).toBe("Iv23liE2eClient");
+
+      await providersPage.keySaveBtn.click();
+      await providersPage.waitForSuccessToast();
+      await expect(providersPage.keyForm).not.toBeVisible({ timeout: 5000 });
+
+      const response = await request.get("/api/providers/github-copilot/keys");
+      expect(response.ok(), await response.text()).toBeTruthy();
+      const body = await response.json();
+      const saved = (
+        body.keys as Array<{ name: string; value?: { value?: string }; github_copilot_key_config?: { oauth_client_id?: { value?: string } } }>
+      ).find((k) => k.name === keyName);
+      expect(saved?.github_copilot_key_config?.oauth_client_id?.value, "the client ID was not saved").toBeTruthy();
+      expect(saved?.value?.value ?? "", "a sign-in key stores no token in its value").toBe("");
+    });
+
+    test("should keep each auth method's fields when switching tabs", async ({ providersPage }) => {
+      const page = providersPage.page;
+      await providersPage.addKeyBtn.click();
+      await expect(providersPage.keyForm).toBeVisible();
+
+      await page.getByTestId("apikey-copilot-token-tab").click();
+      await page.getByTestId("key-input-copilot-token").fill("github_pat_e2e");
+      await page.getByTestId("apikey-copilot-sign-in-tab").click();
+      await expect(page.getByTestId("key-input-copilot-oauth-client-id")).toBeVisible();
+      await expect(page.getByTestId("copilot-sign-in-button")).toBeDisabled();
+
+      // Switching back shows the token again; the save clears the tabs not chosen.
+      await page.getByTestId("apikey-copilot-token-tab").click();
+      await expect(page.getByTestId("key-input-copilot-token")).toHaveValue("github_pat_e2e");
+
+      await providersPage.keyCancelBtn.click();
+    });
+  });
 });

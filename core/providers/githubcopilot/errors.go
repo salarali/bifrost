@@ -11,17 +11,6 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-// errNotAccessibleByIntegration is the marker GitHub returns when a request carried a
-// credential the endpoint does not accept. On the inference path it means the wrong layer
-// of token reached the wire.
-const errNotAccessibleByIntegration = "resource not accessible by integration"
-
-// errPermissionsNotGranted is GitHub's 422 for an installation token request that asks for
-// a permission the installation does not hold. For Copilot that is copilot_requests: write,
-// and it means the App's Copilot Requests permission was never set, or was added after the
-// App was installed and an organization owner has not yet approved the new permission.
-const errPermissionsNotGranted = "permissions requested are not granted"
-
 // copilotErrorBody is the OpenAI-shaped envelope Copilot returns for inference errors.
 // Some auth failures come back as a bare GitHub {"message": "..."} instead, so both
 // shapes are read.
@@ -37,8 +26,7 @@ type copilotErrorBody struct {
 // parseCopilotError converts a Copilot inference error into a BifrostError.
 //
 // Copilot's auth failures are almost always configuration faults rather than transient
-// ones: a revoked token, a Copilot policy that excludes the model, or an installation
-// without the right permission. Retrying those against a fallback provider silently
+// ones: a revoked token or a Copilot policy that excludes the model. Retrying those against a fallback provider silently
 // moves paid traffic somewhere the operator did not choose, so 401 and 403 block
 // fallbacks. Rate limits and server errors are left alone.
 func parseCopilotError(resp *fasthttp.Response) *schemas.BifrostError {
@@ -70,23 +58,7 @@ func parseCopilotError(resp *fasthttp.Response) *schemas.BifrostError {
 		}
 	}
 
-	switch resp.StatusCode() {
-	case fasthttp.StatusUnauthorized:
-		bifrostErr.AllowFallbacks = schemas.Ptr(false)
-		bifrostErr.Error.Message = "github copilot: the Copilot API token was rejected (401). " +
-			"It expired or was revoked. Upstream said: " + upstreamDetail(bifrostErr.Error.Message)
-	case fasthttp.StatusForbidden:
-		bifrostErr.AllowFallbacks = schemas.Ptr(false)
-		if strings.Contains(strings.ToLower(bifrostErr.Error.Message), errNotAccessibleByIntegration) {
-			bifrostErr.Error.Message = "github copilot: the request carried the wrong credential (403). " +
-				"A GitHub installation token belongs on the Copilot token exchange only; the " +
-				"Copilot API token belongs on inference requests."
-			break
-		}
-		bifrostErr.Error.Message = "github copilot: Copilot refused the request (403). " +
-			"The account may lack Copilot access, or an organization policy may exclude this " +
-			"model. Upstream said: " + upstreamDetail(bifrostErr.Error.Message)
-	}
+	classifyAuthError(bifrostErr, resp.StatusCode())
 
 	if strings.TrimSpace(bifrostErr.Error.Message) == "" {
 		if bifrostErr.StatusCode != nil {
@@ -96,6 +68,35 @@ func parseCopilotError(resp *fasthttp.Response) *schemas.BifrostError {
 		}
 	}
 
+	return bifrostErr
+}
+
+// classifyAuthError blocks fallbacks on 401 and 403 and rewrites the message to name the
+// likely cause. Shared by the Copilot-shaped and Anthropic-shaped (/v1/messages) error paths.
+func classifyAuthError(bifrostErr *schemas.BifrostError, status int) {
+	switch status {
+	case fasthttp.StatusUnauthorized:
+		bifrostErr.AllowFallbacks = schemas.Ptr(false)
+		bifrostErr.Error.Message = "github copilot: the Copilot API token was rejected (401). " +
+			"It expired or was revoked. Upstream said: " + upstreamDetail(bifrostErr.Error.Message)
+	case fasthttp.StatusForbidden:
+		bifrostErr.AllowFallbacks = schemas.Ptr(false)
+		bifrostErr.Error.Message = "github copilot: Copilot refused the request (403). " +
+			"The account may lack Copilot access, or an organization policy may exclude this " +
+			"model. Upstream said: " + upstreamDetail(bifrostErr.Error.Message)
+	}
+}
+
+// blockAuthFallbacks applies classifyAuthError to an error from the shared Anthropic
+// handlers, which parse errors themselves and take no custom converter.
+func blockAuthFallbacks(bifrostErr *schemas.BifrostError) *schemas.BifrostError {
+	if bifrostErr == nil || bifrostErr.StatusCode == nil {
+		return bifrostErr
+	}
+	if bifrostErr.Error == nil {
+		bifrostErr.Error = &schemas.ErrorField{}
+	}
+	classifyAuthError(bifrostErr, *bifrostErr.StatusCode)
 	return bifrostErr
 }
 
@@ -113,8 +114,7 @@ func upstreamDetail(message string) string {
 // providerUtils.NewConfigurationError leaves AllowFallbacks nil, and nil means allowed, so
 // a bare configuration error would let a misconfigured Copilot key silently route prompts
 // to whatever fallback is configured, on someone else's bill, while the operator sees a
-// success. Nothing about a missing credential or a malformed private key improves by being
-// retried somewhere else.
+// success. Nothing about a missing credential improves by being retried somewhere else.
 func configurationError(message string) *schemas.BifrostError {
 	bErr := providerUtils.NewConfigurationError(message)
 	bErr.AllowFallbacks = schemas.Ptr(false)

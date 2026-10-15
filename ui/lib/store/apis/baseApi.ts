@@ -198,6 +198,7 @@ export const baseApi = createApi({
 		"MCPSessions",
 		"MCPPerUserHeaderCredentials",
 		"MCPLibrary",
+		"GithubCopilotSignIn",
 		"FeatureFlags",
 		"ComplexityAnalyzerConfig",
 		"Skills",

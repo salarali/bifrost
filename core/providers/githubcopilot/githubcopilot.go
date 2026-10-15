@@ -1,8 +1,9 @@
 // Package githubcopilot implements the GitHub Copilot provider.
 //
-// Copilot exposes an OpenAI-compatible chat completions API, so request and response
-// conversion is delegated wholesale to the openai package. Two things make it unlike the
-// other OpenAI-compatible providers:
+// Copilot serves /chat/completions, /responses and /embeddings in OpenAI shape and
+// /v1/messages in Anthropic shape, so conversion is delegated to the openai and anthropic
+// packages: Claude models go to /v1/messages, the rest to the OpenAI endpoints. Two things
+// make it unlike the other OpenAI-compatible providers:
 //
 //   - The API host is a property of the credential, not of the configuration. Paying
 //     accounts are served from api.individual / api.business / api.enterprise
@@ -11,11 +12,11 @@
 //   - Every call must carry editor-identity headers. Copilot rejects requests that look
 //     like generic API clients.
 //
-// Copilot is authenticated per GitHub's server-to-server model, where a GitHub App holding
-// the "Copilot Requests" permission mints short-lived tokens and usage is billed to the
-// organization that owns the installation. No individual Copilot seat is involved.
+// A key authenticates with a GitHub user token (a fine-grained PAT, or the token "Sign in with
+// GitHub" stores), which Bifrost exchanges for short-lived Copilot tokens, or with a
+// pre-minted Copilot API token. Usage bills to that user's Copilot seat.
 //
-// See https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/server-to-server-tokens
+// See https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate
 package githubcopilot
 
 import (
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maximhq/bifrost/core/providers/anthropic"
 	"github.com/maximhq/bifrost/core/providers/openai"
 	providerUtils "github.com/maximhq/bifrost/core/providers/utils"
 	schemas "github.com/maximhq/bifrost/core/schemas"
@@ -109,23 +111,32 @@ func (p *githubCopilotProvider) ListModels(ctx *schemas.BifrostContext, keys []s
 	if len(keys) == 0 {
 		return nil, configurationError("github copilot: no keys configured")
 	}
+	if request == nil {
+		request = &schemas.BifrostListModelsRequest{}
+	}
+	request.Provider = p.GetProviderKey()
 
-	creds, bErr := resolveCredentials(ctx, keys[0], p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+	// Every key is listed so each one gets its own status, as with the other providers.
+	return providerUtils.HandleMultipleListModelsRequests(ctx, keys, request, p.listModelsByKey)
+}
+
+// listModelsByKey lists the models one key can reach, with that key's own credentials.
+func (p *githubCopilotProvider) listModelsByKey(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostListModelsRequest) (*schemas.BifrostListModelsResponse, *schemas.BifrostError) {
+	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
 	if bErr != nil {
 		return nil, bErr
 	}
 
 	// ListModelsByKey reads key.Value for the Authorization header, so hand it the
 	// resolved token rather than the stored credential.
-	authKey := keys[0]
-	authKey.Value = *schemas.NewSecretVar(creds.Token)
+	key.Value = *schemas.NewSecretVar(creds.Token)
 
 	return openai.ListModelsByKey(
 		ctx,
 		p.client,
 		creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/models"),
-		authKey,
-		request != nil && request.Unfiltered,
+		key,
+		request.Unfiltered,
 		p.mergeEditorHeaders(nil),
 		p.GetProviderKey(),
 		providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
@@ -161,11 +172,27 @@ func (p *githubCopilotProvider) TextCompletionStream(ctx *schemas.BifrostContext
 	return nil, providerUtils.NewUnsupportedOperationError(schemas.TextCompletionStreamRequest, p.GetProviderKey())
 }
 
-// ChatCompletion performs a chat completion request to the Copilot API.
+// ChatCompletion performs a chat completion request to the Copilot API. Claude models go to
+// Copilot's native Anthropic Messages endpoint; everything else to /chat/completions.
 func (p *githubCopilotProvider) ChatCompletion(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostChatRequest) (*schemas.BifrostChatResponse, *schemas.BifrostError) {
 	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
 	if bErr != nil {
 		return nil, bErr
+	}
+
+	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
+		response, bErr := anthropic.HandleAnthropicChatCompletionRequest(
+			ctx,
+			p.client,
+			creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/messages"),
+			request,
+			p.anthropicBuildConfig(false, false),
+			buildAuthHeaders(creds, chatRequestHasImageContent(request)),
+			p.networkConfig.ExtraHeaders,
+			nil,
+			p.logger,
+		)
+		return response, blockAuthFallbacks(bErr)
 	}
 
 	return openai.HandleOpenAIChatCompletionRequest(
@@ -185,11 +212,38 @@ func (p *githubCopilotProvider) ChatCompletion(ctx *schemas.BifrostContext, key 
 	)
 }
 
-// ChatCompletionStream performs a streaming chat completion request to the Copilot API.
+// ChatCompletionStream performs a streaming chat completion request to the Copilot API,
+// routed the same way as ChatCompletion.
 func (p *githubCopilotProvider) ChatCompletionStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostChatRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
 	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
 	if bErr != nil {
 		return nil, bErr
+	}
+
+	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
+		jsonData, bErr := anthropic.BuildAnthropicChatRequestBody(ctx, request, p.anthropicBuildConfig(true, false))
+		if bErr != nil {
+			return nil, bErr
+		}
+		stream, bErr := anthropic.HandleAnthropicChatCompletionStreaming(
+			ctx,
+			p.streamingClient,
+			creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/messages"),
+			jsonData,
+			buildAuthHeaders(creds, chatRequestHasImageContent(request)),
+			p.networkConfig.ExtraHeaders,
+			p.networkConfig.StreamIdleTimeoutInSeconds,
+			p.networkConfig.BetaHeaderOverrides,
+			providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
+			providerUtils.ShouldSendBackRawResponse(ctx, p.sendBackRawResponse),
+			p.GetProviderKey(),
+			postHookRunner,
+			nil,
+			nil,
+			p.logger,
+			postHookSpanFinalizer,
+		)
+		return stream, blockAuthFallbacks(bErr)
 	}
 
 	return openai.HandleOpenAIChatCompletionStreaming(
@@ -215,27 +269,165 @@ func (p *githubCopilotProvider) ChatCompletionStream(ctx *schemas.BifrostContext
 	)
 }
 
-// Responses performs a responses request by converting through chat completions.
-//
-// Copilot may expose a native /responses endpoint, but only for some model families, so
-// converting is the shape that works for every account.
+// Responses performs a responses request to the Copilot API. Claude models go to
+// /v1/messages, models Copilot serves on /responses go native, and the rest (Gemini, Grok
+// and other chat-only models) are converted through /chat/completions.
 func (p *githubCopilotProvider) Responses(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostResponsesRequest) (*schemas.BifrostResponsesResponse, *schemas.BifrostError) {
-	chatResponse, err := p.ChatCompletion(ctx, key, request.ToChatRequest())
-	if err != nil {
-		return nil, err
+	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
+		creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+		if bErr != nil {
+			return nil, bErr
+		}
+		response, bErr := anthropic.HandleAnthropicResponsesRequest(
+			ctx,
+			p.client,
+			creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/messages"),
+			request,
+			p.anthropicBuildConfig(false, true),
+			buildAuthHeaders(creds, responsesRequestHasImageContent(request)),
+			p.networkConfig.ExtraHeaders,
+			nil,
+			p.logger,
+		)
+		return response, blockAuthFallbacks(bErr)
 	}
-	return chatResponse.ToBifrostResponsesResponse(), nil
+
+	if !supportsResponsesEndpoint(ctx, request.Model) {
+		chatResponse, bErr := p.ChatCompletion(ctx, key, request.ToChatRequest())
+		if bErr != nil {
+			return nil, bErr
+		}
+		return chatResponse.ToBifrostResponsesResponse(), nil
+	}
+
+	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+	if bErr != nil {
+		return nil, bErr
+	}
+	return openai.HandleOpenAIResponsesRequest(
+		ctx,
+		p.client,
+		creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/responses"),
+		request,
+		buildAuthHeaders(creds, responsesRequestHasImageContent(request)),
+		p.networkConfig.ExtraHeaders,
+		providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
+		providerUtils.ShouldSendBackRawResponse(ctx, p.sendBackRawResponse),
+		p.GetProviderKey(),
+		nil,
+		parseCopilotError,
+		nil,
+		p.logger,
+	)
 }
 
-// ResponsesStream performs a streaming responses request by converting through chat completions.
+// ResponsesStream performs a streaming responses request, routed the same way as Responses.
 func (p *githubCopilotProvider) ResponsesStream(ctx *schemas.BifrostContext, postHookRunner schemas.PostHookRunner, postHookSpanFinalizer func(context.Context), key schemas.Key, request *schemas.BifrostResponsesRequest) (chan *schemas.BifrostStreamChunk, *schemas.BifrostError) {
-	ctx.SetValue(schemas.BifrostContextKeyIsResponsesToChatCompletionFallback, true)
-	return p.ChatCompletionStream(ctx, postHookRunner, postHookSpanFinalizer, key, request.ToChatRequest())
+	if schemas.IsAnthropicModelFamily(ctx, request.Model) {
+		creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+		if bErr != nil {
+			return nil, bErr
+		}
+		jsonData, bErr := anthropic.BuildAnthropicResponsesRequestBody(ctx, request, p.anthropicBuildConfig(true, true))
+		if bErr != nil {
+			return nil, bErr
+		}
+		stream, bErr := anthropic.HandleAnthropicResponsesStream(
+			ctx,
+			p.streamingClient,
+			creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/v1/messages"),
+			jsonData,
+			buildAuthHeaders(creds, responsesRequestHasImageContent(request)),
+			p.networkConfig.ExtraHeaders,
+			p.networkConfig.StreamIdleTimeoutInSeconds,
+			p.networkConfig.BetaHeaderOverrides,
+			providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
+			providerUtils.ShouldSendBackRawResponse(ctx, p.sendBackRawResponse),
+			p.GetProviderKey(),
+			postHookRunner,
+			nil,
+			nil,
+			p.logger,
+			postHookSpanFinalizer,
+		)
+		return stream, blockAuthFallbacks(bErr)
+	}
+
+	if !supportsResponsesEndpoint(ctx, request.Model) {
+		// The shared chat streaming handler re-assembles Responses events from the chat
+		// chunks when this flag is set.
+		ctx.SetValue(schemas.BifrostContextKeyIsResponsesToChatCompletionFallback, true)
+		return p.ChatCompletionStream(ctx, postHookRunner, postHookSpanFinalizer, key, request.ToChatRequest())
+	}
+
+	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+	if bErr != nil {
+		return nil, bErr
+	}
+	return openai.HandleOpenAIResponsesStreaming(
+		ctx,
+		p.streamingClient,
+		creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/responses"),
+		request,
+		buildAuthHeaders(creds, responsesRequestHasImageContent(request)),
+		p.networkConfig.ExtraHeaders,
+		p.networkConfig.StreamIdleTimeoutInSeconds,
+		providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
+		providerUtils.ShouldSendBackRawResponse(ctx, p.sendBackRawResponse),
+		p.GetProviderKey(),
+		postHookRunner,
+		nil,
+		parseCopilotError,
+		nil,
+		nil,
+		nil,
+		p.logger,
+		postHookSpanFinalizer,
+	)
 }
 
-// Embedding is not supported by GitHub Copilot.
+// supportsResponsesEndpoint reports whether Copilot serves the model on /responses. A
+// datasheet supported_endpoints row wins; without one only the OpenAI family is assumed to,
+// since Copilot serves Gemini, Grok and its other hosted models on /chat/completions alone.
+func supportsResponsesEndpoint(ctx *schemas.BifrostContext, model string) bool {
+	canonicalModel := schemas.ResolveCanonicalModel(ctx, model)
+	return schemas.ResolveModelCaps(schemas.GithubCopilot, canonicalModel).
+		SupportsResponsesEndpoint(schemas.IsOpenAIModelFamily(ctx, model))
+}
+
+// anthropicBuildConfig is the request-shaping config for Copilot's /v1/messages endpoint.
+func (p *githubCopilotProvider) anthropicBuildConfig(isStreaming, validateTools bool) anthropic.AnthropicRequestBuildConfig {
+	return anthropic.AnthropicRequestBuildConfig{
+		Provider:                  schemas.GithubCopilot,
+		IsStreaming:               isStreaming,
+		ValidateTools:             validateTools,
+		BetaHeaderOverrides:       p.networkConfig.BetaHeaderOverrides,
+		ShouldSendBackRawRequest:  p.sendBackRawRequest,
+		ShouldSendBackRawResponse: p.sendBackRawResponse,
+	}
+}
+
+// Embedding performs an embedding request to the Copilot API.
 func (p *githubCopilotProvider) Embedding(ctx *schemas.BifrostContext, key schemas.Key, request *schemas.BifrostEmbeddingRequest) (*schemas.BifrostEmbeddingResponse, *schemas.BifrostError) {
-	return nil, providerUtils.NewUnsupportedOperationError(schemas.EmbeddingRequest, p.GetProviderKey())
+	creds, bErr := resolveCredentials(ctx, key, p.exchangeClient, p.networkConfig.BaseURL, p.logger)
+	if bErr != nil {
+		return nil, bErr
+	}
+
+	return openai.HandleOpenAIEmbeddingRequest(
+		ctx,
+		p.client,
+		creds.BaseURL+providerUtils.GetPathFromContext(ctx, "/embeddings"),
+		request,
+		buildAuthHeaders(creds, false),
+		p.networkConfig.ExtraHeaders,
+		p.GetProviderKey(),
+		providerUtils.ShouldSendBackRawRequest(ctx, p.sendBackRawRequest),
+		providerUtils.ShouldSendBackRawResponse(ctx, p.sendBackRawResponse),
+		nil,
+		parseCopilotError,
+		p.logger,
+	)
 }
 
 // Rerank is not supported by GitHub Copilot.

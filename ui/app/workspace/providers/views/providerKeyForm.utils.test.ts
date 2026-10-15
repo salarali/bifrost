@@ -184,3 +184,30 @@ describe("applyAuthMethod clears the static key for the other providers' tabs", 
 		expect(out.value).toBeUndefined();
 	});
 });
+// Copilot keeps both tabs' fields in the form so switching tabs loses nothing; the save is what
+// clears the tab not chosen, or a stored token would keep authenticating a sign-in key.
+describe("applyAuthMethod clears the GitHub Copilot tab not chosen", () => {
+	const empty = { value: "" };
+	const masked = { value: "github_pat_****abcd" };
+	const clientId = { value: "Iv23liAbC" };
+	const apply = (authType?: "token" | "sign_in") =>
+		applyAuthMethod({ name: "k", value: masked, github_copilot_key_config: { oauth_client_id: clientId, _auth_type: authType } }, true);
+
+	it("keeps only the token on the token tab", () => {
+		const out = apply("token");
+		expect(out.value).toEqual(masked);
+		expect(out.github_copilot_key_config).toEqual({ oauth_client_id: empty });
+	});
+
+	it("keeps only the client ID on the sign in tab", () => {
+		const out = apply("sign_in");
+		expect(out.value).toEqual(empty);
+		expect(out.github_copilot_key_config).toEqual({ oauth_client_id: clientId });
+	});
+
+	it("leaves a key alone when no tab was chosen", () => {
+		const out = apply(undefined);
+		expect(out.value).toEqual(masked);
+		expect(out.github_copilot_key_config).toEqual({ oauth_client_id: clientId });
+	});
+});

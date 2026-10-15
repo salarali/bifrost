@@ -797,7 +797,9 @@ test("redaction matrix covers every standard provider exactly once", () => {
   assert.deepStrictEqual(redactionFixtures.map((f) => f.provider).sort(), [...standardProviders].sort());
   for (const fixture of redactionFixtures) {
     assert.strictEqual(fixture.key.enabled, false);
-    assert.strictEqual(fixture.key.value, redactionRef);
+    // A GitHub Copilot sign-in key carries no value; the gateway supplies the signed-in token.
+    const signIn = Boolean(fixture.key.github_copilot_key_config?.oauth_client_id);
+    assert.strictEqual(fixture.key.value, signIn ? undefined : redactionRef);
     assert.strictEqual(fixture.key.aliases.probe.region, redactionRef);
     assert.strictEqual(fixture.key.aliases.probe.project_id, redactionRef);
   }
@@ -899,8 +901,10 @@ function simulateRedaction(fixture, mode = "masked", existing = false, auth = fa
         callback(null, response(keyResponse()));
       } else if (req.method === "PUT") {
         const update = JSON.parse(req.body.raw);
-        assert.strictEqual(update.value.value, redactionMask, "update must echo the masked wire response");
-        assert.strictEqual(update.value.ref, redactionRef);
+        // A sign-in key has no value, so its client ID is the masked field echoed back.
+        const echoed = fixture.key.value ? update.value : update.github_copilot_key_config.oauth_client_id;
+        assert.strictEqual(echoed.value, redactionMask, "update must echo the masked wire response");
+        assert.strictEqual(echoed.ref, redactionRef);
         savedKey = update;
         callback(null, response(keyResponse()));
       } else if (req.method === "DELETE" && path.includes("/keys/")) {

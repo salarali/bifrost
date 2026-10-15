@@ -327,14 +327,13 @@ export const ProviderFormSchema = z
 			// Validate individual key values based on provider type
 			const effectiveProviderType = data.baseProviderType || data.selectedProvider;
 			data.keys.forEach((key, index) => {
-				// GitHub Copilot is checked separately below: the credential can live entirely
-				// in github_copilot_key_config, so an empty top-level value is only a fault
-				// when the App credentials are absent too.
+				// GitHub Copilot is checked separately: a sign-in key has no value, so an empty
+				// value is only a fault when there is no sign-in client ID either.
 				if (effectiveProviderType === "github-copilot") {
 					if (!key.value.trim() && !githubCopilotKeyConfigComplete(key.github_copilot_key_config)) {
 						ctx.addIssue({
 							code: z.ZodIssueCode.custom,
-							message: "Set a Copilot API token, or fill in all four GitHub App credentials",
+							message: "Set a token, or a client ID to sign in with GitHub",
 							path: ["keys", index, "value"],
 						});
 					}

@@ -11,16 +11,22 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { TagInput } from "@/components/ui/tagInput";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { hasCopilotApiToken, isRedacted } from "@/lib/utils/validation";
+import { isSecretVarSet } from "@/lib/utils/secretVarForm";
+import { isRedacted } from "@/lib/utils/validation";
 import { Info } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Control, UseFormReturn } from "react-hook-form";
 import { DeploymentsTable } from "./deploymentsTable";
+import { GithubCopilotSignIn } from "./githubCopilotSignIn";
 
 // Providers that support batch APIs
 // Vertex authentication methods offered by the key form. The backend picks the mode from which
 // fields are set; this discriminator only drives the tabs and validation.
 type VertexAuthType = "service_account" | "service_account_json" | "api_key" | "aws_workload_identity";
+
+// GitHub Copilot authentication methods. Like Vertex, the backend picks the mode from which
+// fields are set, so this only drives the tabs.
+type CopilotAuthType = "token" | "sign_in";
 
 const BATCH_SUPPORTED_PROVIDERS = ["openai", "bedrock", "anthropic", "gemini", "azure", "vertex", "wafer"];
 
@@ -162,10 +168,6 @@ export function ApiKeyFormFragment({ control, providerName, baseProviderType, fo
 	// openai, and every custom provider built on the openai base, may mint its bearer from
 	// oauth_key_config instead of carrying a static API key.
 	const isOpenAICompatible = effectiveProvider === "openai";
-	// Reactive, so the App-credential labels stay truthful. Once a Copilot token is present
-	// those fields genuinely are optional, and a static "(Required)" would contradict the
-	// section note telling the operator they can leave them blank.
-	const copilotAppSuffix = hasCopilotApiToken(form.watch("key.value")) ? "(Optional)" : "(Required)";
 	const isKeylessProvider = isOllama || isSGL;
 	const supportsBatchAPI = BATCH_SUPPORTED_PROVIDERS.includes(effectiveProvider);
 
@@ -184,6 +186,12 @@ export function ApiKeyFormFragment({ control, providerName, baseProviderType, fo
 	// Auth type state for openai-based keys: a static API key, or an OAuth-minted bearer
 	const [openaiAuthType, setOpenaiAuthType] = useState<"api_key" | "oauth">("api_key");
 	const oauthGrantType = form.watch("key.oauth_key_config.grant_type") ?? "client_credentials";
+
+	// Auth type state for GitHub Copilot: a pasted token, or Sign in with GitHub
+	const [copilotAuthType, setCopilotAuthType] = useState<CopilotAuthType>("token");
+	const copilotKeyId: string = form.watch("key.id") ?? "";
+	const copilotClientIdField = form.watch("key.github_copilot_key_config.oauth_client_id");
+	const copilotClientId: string = copilotClientIdField?.ref?.trim() || copilotClientIdField?.value?.trim() || "";
 
 	// Auth type state for Vertex: 'service_account' (ADC), 'service_account_json', 'api_key', or
 	// 'aws_workload_identity' (GCP Workload Identity Federation from the workload's AWS identity)
@@ -231,6 +239,24 @@ export function ApiKeyFormFragment({ control, providerName, baseProviderType, fo
 			form.setValue("key.vertex_key_config._auth_type", detected);
 		}
 	}, [isVertex, form]);
+
+	const copilotDefaults = form.formState.defaultValues?.key?.github_copilot_key_config;
+	useEffect(() => {
+		if (form.formState.isDirty || !isGithubCopilot) return;
+		const config = form.getValues("key.github_copilot_key_config");
+		const detected: CopilotAuthType = isSecretVarSet(config?.oauth_client_id) ? "sign_in" : "token";
+		setCopilotAuthType(detected);
+		form.setValue("key.github_copilot_key_config._auth_type", detected);
+		// copilotDefaults re-runs detection once the edited key resolves, as for Databricks.
+	}, [isGithubCopilot, form, copilotDefaults]);
+
+	// The two Copilot methods are alternatives; the gateway refuses a key that mixes them.
+	// Switching keeps both tabs' fields, so switching back shows them again, and the save
+	// clears the tab not chosen (applyAuthMethod).
+	const switchCopilotAuthType = (next: CopilotAuthType) => {
+		setCopilotAuthType(next);
+		form.setValue("key.github_copilot_key_config._auth_type", next, { shouldDirty: true, shouldValidate: true });
+	};
 
 	const databricksDefaults = form.formState.defaultValues?.key?.databricks_key_config;
 	useEffect(() => {
@@ -373,28 +399,15 @@ export function ApiKeyFormFragment({ control, providerName, baseProviderType, fo
 				/>
 			</div>
 			{/* Hide API Key field for providers with dedicated auth tabs */}
-			{!isAzure && !isBedrock && !isBedrockMantle && !isVertex && !isDatabricks && !isOpenAICompatible && (
+			{!isAzure && !isBedrock && !isBedrockMantle && !isVertex && !isDatabricks && !isOpenAICompatible && !isGithubCopilot && (
 				<FormField
 					control={control}
 					name={`key.value`}
 					render={({ field }) => (
 						<FormItem className="px-0.5">
-							<FormLabel>
-								{isGithubCopilot ? "Copilot API Token" : "API Key"} {isVLLM || isGithubCopilot ? "(Optional)" : ""}
-							</FormLabel>
-							{isGithubCopilot && (
-								<FormDescription>
-									Requires Network Config &gt; Base URL set to the host the token was issued for, because a Copilot token does not carry
-									one. Also expires after about 30 minutes, and Bifrost cannot refresh a token it did not mint, so prefer the GitHub App
-									below for anything long-running.
-								</FormDescription>
-							)}
+							<FormLabel>API Key {isVLLM ? "(Optional)" : ""}</FormLabel>
 							<FormControl>
-								<SecretVarInput
-									placeholder={isGithubCopilot ? "Copilot API token, or leave blank to use a GitHub App" : "API Key or env.MY_KEY"}
-									type="text"
-									{...field}
-								/>
+								<SecretVarInput placeholder="API Key or env.MY_KEY" type="text" {...field} />
 							</FormControl>
 							<FormMessage />
 						</FormItem>
@@ -1572,156 +1585,94 @@ export function ApiKeyFormFragment({ control, providerName, baseProviderType, fo
 			{isGithubCopilot && (
 				<div className="space-y-4">
 					<Separator />
-					<div className="bg-muted/50 flex items-start gap-2 rounded-md border p-3">
-						<Info className="text-muted-foreground mt-0.5 h-4 w-4 shrink-0" />
-						<p className="text-muted-foreground text-sm">
-							Copilot accepts either credential. Fill in <strong>one</strong> of the two. <strong>GitHub App</strong> is the option for a
-							shared gateway: usage bills to the organization that owns the installation and no individual Copilot seat is used. A{" "}
-							<strong>Copilot API token</strong> in the field above is simpler but expires after about 30 minutes, so it suits testing
-							rather than a running gateway.{" "}
-							<a
-								href="https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/server-to-server-tokens"
-								target="_blank"
-								rel="noopener noreferrer"
-								className="text-primary hover:underline"
-								data-testid="copilot-docs-link-server-to-server"
-							>
-								Set up a GitHub App for Copilot
-							</a>
-							{" or "}
-							<a
-								href="https://docs.github.com/en/copilot/how-tos/copilot-sdk/authenticate-copilot-sdk/authenticate-copilot-sdk"
-								target="_blank"
-								rel="noopener noreferrer"
-								className="text-primary hover:underline"
-								data-testid="copilot-docs-link-api-token"
-							>
-								get a Copilot API token
-							</a>
-							.
-						</p>
+					<div className="space-y-2">
+						<FormLabel>Authentication Method</FormLabel>
+						<Tabs value={copilotAuthType} onValueChange={(v) => switchCopilotAuthType(v as CopilotAuthType)}>
+							<TabsList className="grid w-full grid-cols-2">
+								<TabsTrigger data-testid="apikey-copilot-token-tab" value="token">
+									Token
+								</TabsTrigger>
+								<TabsTrigger data-testid="apikey-copilot-sign-in-tab" value="sign_in">
+									Sign in with GitHub
+								</TabsTrigger>
+							</TabsList>
+						</Tabs>
 					</div>
-					<div className="space-y-1.5">
-						{/* Label, not FormLabel: this heads a section rather than labelling one
-						    control, so there is no FormItem id for htmlFor to point at. */}
-						<Label>GitHub App Credentials</Label>
-						<p className="text-muted-foreground text-sm">
-							Leave these blank if you supplied a Copilot API token above. Otherwise all four are needed together. The App needs the Copilot
-							Requests permission at Read &amp; write, installed on the organization that should be billed with All repositories access, and
-							that organization must allow Copilot requests from GitHub App installations.
-						</p>
-					</div>
-					<FormField
-						control={control}
-						name="key.github_copilot_key_config.app_id"
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>App ID {copilotAppSuffix}</FormLabel>
-								<FormDescription>
-									The GitHub App&apos;s App ID or Client ID, from its settings page.{" "}
-									<a
-										href="https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/registering-a-github-app"
-										target="_blank"
-										rel="noopener noreferrer"
-										className="text-primary hover:underline"
-										data-testid="copilot-docs-link-create-app"
-									>
-										Create a GitHub App
-									</a>
-								</FormDescription>
-								<FormControl>
-									<SecretVarInput data-testid="key-input-copilot-app-id" placeholder="123456 or env.COPILOT_APP_ID" {...field} />
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={control}
-						name="key.github_copilot_key_config.installation_id"
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>Installation ID {copilotAppSuffix}</FormLabel>
-								<FormDescription>
-									The installation on the organization that should be billed.{" "}
-									<a
-										href="https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-an-installation-access-token-for-a-github-app"
-										target="_blank"
-										rel="noopener noreferrer"
-										className="text-primary hover:underline"
-										data-testid="copilot-docs-link-installation-id"
-									>
-										Find your installation ID
-									</a>
-								</FormDescription>
-								<FormControl>
-									<SecretVarInput
-										data-testid="key-input-copilot-installation-id"
-										placeholder="87654321 or env.COPILOT_INSTALLATION_ID"
-										{...field}
-									/>
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={control}
-						name="key.github_copilot_key_config.repository_id"
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>Repository ID {copilotAppSuffix}</FormLabel>
-								<FormDescription>
-									Any repository the installation can access. Copilot&apos;s permission check requires one in the token request even though
-									the installation itself needs All repositories access, so this is not really a scoping choice.
-								</FormDescription>
-								<FormControl>
-									<SecretVarInput
-										data-testid="key-input-copilot-repository-id"
-										placeholder="999000111 or env.COPILOT_REPOSITORY_ID"
-										{...field}
-									/>
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={control}
-						name="key.github_copilot_key_config.private_key"
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>Private Key {copilotAppSuffix}</FormLabel>
-								<FormDescription>
-									The App&apos;s private key in PEM form, as downloaded from GitHub. PKCS#1 and PKCS#8 both work.
-								</FormDescription>
-								<FormControl>
-									<SecretVarInput
-										data-testid="key-input-copilot-private-key"
-										variant="textarea"
-										rows={4}
-										placeholder="-----BEGIN RSA PRIVATE KEY----- or env.COPILOT_PRIVATE_KEY"
-										{...field}
-									/>
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
-					<FormField
-						control={control}
-						name="key.github_copilot_key_config.github_domain"
-						render={({ field }) => (
-							<FormItem>
-								<FormLabel>GitHub Enterprise Domain (Optional)</FormLabel>
-								<FormDescription>Leave blank for github.com</FormDescription>
-								<FormControl>
-									<SecretVarInput data-testid="key-input-copilot-github-domain" placeholder="acme.ghe.com" {...field} />
-								</FormControl>
-								<FormMessage />
-							</FormItem>
-						)}
-					/>
+					{copilotAuthType === "token" && (
+						<FormField
+							control={control}
+							name="key.value"
+							render={({ field }) => (
+								<FormItem>
+									<FormLabel>GitHub Token or Copilot API Token</FormLabel>
+									<FormDescription>
+										Paste a fine-grained personal access token (<code>github_pat_…</code>, with the account permission Copilot Requests) or
+										a GitHub OAuth token (<code>ghu_…</code> or <code>gho_…</code>) from an account with a Copilot seat: Bifrost exchanges
+										it for Copilot tokens, refreshes them, and learns the API host itself. A raw Copilot API token instead needs Network
+										Config &gt; Base URL set to the host it was issued for and expires after about 30 minutes.{" "}
+										<a
+											href="https://docs.github.com/en/copilot/how-tos/copilot-sdk/authenticate-copilot-sdk/authenticate-copilot-sdk"
+											target="_blank"
+											rel="noopener noreferrer"
+											className="text-primary hover:underline"
+											data-testid="copilot-docs-link-api-token"
+										>
+											Copilot authentication options
+										</a>
+									</FormDescription>
+									<FormControl>
+										<SecretVarInput
+											data-testid="key-input-copilot-token"
+											placeholder="github_pat_… or ghu_… token, or a Copilot API token"
+											type="text"
+											{...field}
+										/>
+									</FormControl>
+									<FormMessage />
+								</FormItem>
+							)}
+						/>
+					)}
+					{copilotAuthType === "sign_in" && (
+						<>
+							<p className="text-muted-foreground text-sm">
+								Sign in once as a GitHub user with a Copilot seat; usage bills to that seat. Bifrost keeps the GitHub token and refreshes it
+								in the background, so nothing needs pasting again. Use the client ID of your own GitHub App with{" "}
+								<strong>Enable Device Flow</strong> turned on.{" "}
+								<a
+									href="https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app#using-the-device-flow-to-generate-a-user-access-token"
+									target="_blank"
+									rel="noopener noreferrer"
+									className="text-primary hover:underline"
+									data-testid="copilot-docs-link-device-flow"
+								>
+									About the device flow
+								</a>
+							</p>
+							<FormField
+								control={control}
+								name="key.github_copilot_key_config.oauth_client_id"
+								render={({ field }) => (
+									<FormItem>
+										<FormLabel>GitHub App Client ID (Required)</FormLabel>
+										<FormDescription>
+											From the GitHub App&apos;s settings page. This is the Client ID, not the numeric App ID.
+										</FormDescription>
+										<FormControl>
+											<SecretVarInput
+												data-testid="key-input-copilot-oauth-client-id"
+												placeholder="Iv23li… or env.COPILOT_CLIENT_ID"
+												type="text"
+												{...field}
+											/>
+										</FormControl>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+							<GithubCopilotSignIn provider={providerName} keyId={copilotKeyId} clientId={copilotClientId} />
+						</>
+					)}
 				</div>
 			)}
 			{(isSGL || isDeepseek || isFireworks || isVLLM) && (

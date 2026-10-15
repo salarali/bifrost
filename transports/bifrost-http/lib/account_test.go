@@ -285,3 +285,73 @@ func TestGetConfigForProvider_CarriesInjectedTools(t *testing.T) {
 		t.Errorf("injected_tools must reach core; got %+v", config.InjectedTools)
 	}
 }
+
+// staticCopilotTokens is a githubCopilotTokenSource with fixed tokens.
+type staticCopilotTokens map[string]string
+
+func (s staticCopilotTokens) AccessToken(keyID string) (string, bool) {
+	token, ok := s[keyID]
+	return token, ok
+}
+
+// TestWithGithubCopilotSignIns pins that a "Sign in with GitHub" key reaches the provider
+// with the stored user token as its value, and that the config's shared key slice, which
+// every request reads, is never written.
+func TestWithGithubCopilotSignIns(t *testing.T) {
+	signIn := &schemas.GithubCopilotKeyConfig{OAuthClientID: *schemas.NewSecretVar("Iv23liAbC")}
+	keys := []schemas.Key{
+		{ID: "pat", Value: *schemas.NewSecretVar("github_pat_abc")},
+		{ID: "signed-in", GithubCopilotKeyConfig: signIn},
+		{ID: "not-signed-in", GithubCopilotKeyConfig: signIn},
+	}
+	tokens := staticCopilotTokens{"signed-in": "ghu_current", "pat": "ghu_unused"}
+
+	got := withGithubCopilotSignIns(keys, tokens)
+
+	if got[1].Value.GetValue() != "ghu_current" {
+		t.Fatalf("signed-in key value: got %q, want the stored token", got[1].Value.GetValue())
+	}
+	if got[0].Value.GetValue() != "github_pat_abc" {
+		t.Errorf("a key with its own value must keep it, got %q", got[0].Value.GetValue())
+	}
+	if got[2].Value.IsSet() {
+		t.Errorf("a key with no active sign-in must stay empty so the provider asks for a new sign-in")
+	}
+	if keys[1].Value.IsSet() {
+		t.Fatal("the shared key slice was modified; concurrent requests would see each other's tokens")
+	}
+}
+
+func TestWithGithubCopilotSignInsLeavesOtherKeysAlone(t *testing.T) {
+	keys := []schemas.Key{{ID: "pat", Value: *schemas.NewSecretVar("github_pat_abc")}}
+	tokens := staticCopilotTokens{}
+
+	allocs := testing.AllocsPerRun(1000, func() {
+		_ = withGithubCopilotSignIns(keys, tokens)
+	})
+	if allocs != 0 {
+		t.Fatalf("keys without sign-in must cost no allocation, got %v", allocs)
+	}
+	if got := withGithubCopilotSignIns(keys, tokens); &got[0] != &keys[0] {
+		t.Fatal("keys without sign-in should be returned as-is")
+	}
+}
+
+func BenchmarkWithGithubCopilotSignIns(b *testing.B) {
+	signIn := &schemas.GithubCopilotKeyConfig{OAuthClientID: *schemas.NewSecretVar("Iv23liAbC")}
+	tokens := staticCopilotTokens{"signed-in": "ghu_current"}
+	b.Run("no sign-in keys", func(b *testing.B) {
+		keys := []schemas.Key{{ID: "pat", Value: *schemas.NewSecretVar("github_pat_abc")}}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = withGithubCopilotSignIns(keys, tokens)
+		}
+	})
+	b.Run("one sign-in key", func(b *testing.B) {
+		keys := []schemas.Key{{ID: "signed-in", GithubCopilotKeyConfig: signIn}}
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_ = withGithubCopilotSignIns(keys, tokens)
+		}
+	})
+}

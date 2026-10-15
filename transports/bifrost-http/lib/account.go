@@ -67,7 +67,42 @@ func (baseAccount *BaseAccount) GetKeysForProvider(ctx context.Context, provider
 			}
 		}
 	}
+	if providerKey == schemas.GithubCopilot && baseAccount.store.GithubCopilotSignIn != nil {
+		keys = withGithubCopilotSignIns(keys, baseAccount.store.GithubCopilotSignIn)
+	}
 	return keys, nil
+}
+
+// githubCopilotTokenSource is the request-path slice of copilotsignin.Manager.
+type githubCopilotTokenSource interface {
+	AccessToken(keyID string) (string, bool)
+}
+
+// withGithubCopilotSignIns puts each "Sign in with GitHub" key's current user token in its
+// value, where the Copilot provider already handles GitHub user tokens. The shared slice is
+// never modified: keys are copied only when at least one uses sign-in, so other Copilot keys
+// cost one pass and no allocation. A key without an active sign-in keeps its empty value, and
+// the provider reports that it needs a new sign-in.
+func withGithubCopilotSignIns(keys []schemas.Key, tokens githubCopilotTokenSource) []schemas.Key {
+	var out []schemas.Key
+	for i := range keys {
+		if !keys[i].GithubCopilotKeyConfig.UsesSignIn() || keys[i].Value.IsSet() {
+			continue
+		}
+		token, ok := tokens.AccessToken(keys[i].ID)
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = make([]schemas.Key, len(keys))
+			copy(out, keys)
+		}
+		out[i].Value = schemas.SecretVar{Val: token}
+	}
+	if out == nil {
+		return keys
+	}
+	return out
 }
 
 // GetConfigForProvider returns the complete configuration for a specific provider.

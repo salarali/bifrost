@@ -280,20 +280,40 @@ export const DefaultDatabricksKeyConfig: DatabricksKeyConfig = {
 
 // GithubCopilotKeyConfig matching Go's schemas.GithubCopilotKeyConfig
 export interface GithubCopilotKeyConfig {
-	app_id: SecretVar;
-	installation_id: SecretVar;
-	repository_id: SecretVar;
-	private_key: SecretVar;
-	github_domain?: SecretVar;
+	// Client ID of a GitHub App with Device Flow enabled. Selects "Sign in with GitHub".
+	oauth_client_id?: SecretVar;
+	_auth_type?: "token" | "sign_in"; // UI-only, stripped before submit
+}
+
+// GithubCopilotSignInStatus is a key's "Sign in with GitHub" state.
+export interface GithubCopilotSignInStatus {
+	signed_in: boolean;
+	status?: "active" | "needs_reauth";
+	status_reason?: string;
+	login?: string;
+	access_expires_at?: string;
+	refresh_expires_at?: string;
+}
+
+// GithubCopilotDeviceCode is what the operator enters on github.com to finish signing in.
+export interface GithubCopilotDeviceCode {
+	device_code: string;
+	user_code: string;
+	verification_uri: string;
+	expires_in: number;
+	interval: number;
+}
+
+export interface GithubCopilotSignInPollResult {
+	status: "pending" | "complete" | "expired" | "denied";
+	interval?: number;
+	login?: string;
 }
 
 // Default GithubCopilotKeyConfig
 export const DefaultGithubCopilotKeyConfig: GithubCopilotKeyConfig = {
-	app_id: { value: "", ref: "" },
-	installation_id: { value: "", ref: "" },
-	repository_id: { value: "", ref: "" },
-	private_key: { value: "", ref: "" },
-	github_domain: { value: "", ref: "" },
+	oauth_client_id: { value: "", ref: "" },
+	_auth_type: "token",
 } as const satisfies Required<GithubCopilotKeyConfig>;
 
 // OAuthKeyConfig matching Go's schemas.OAuthKeyConfig. Honoured by openai and by custom

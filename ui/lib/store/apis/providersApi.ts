@@ -1,6 +1,9 @@
 import {
 	AddProviderRequest,
 	CreateProviderKeyRequest,
+	GithubCopilotDeviceCode,
+	GithubCopilotSignInPollResult,
+	GithubCopilotSignInStatus,
 	ListProviderKeysResponse,
 	ListProvidersResponse,
 	ModelProvider,
@@ -204,6 +207,50 @@ export const providersApi = baseApi.injectEndpoints({
 		getProviderKey: builder.query<ModelProviderKey, { provider: string; keyId: string }>({
 			query: ({ provider, keyId }) => `/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(keyId)}`,
 			providesTags: (result, error, { provider }) => [{ type: "ProviderKeys", id: provider }],
+		}),
+
+		// GitHub Copilot "Sign in with GitHub" (device flow). The gateway talks to GitHub; the
+		// UI shows the code and polls. clientId may be the unsaved form value.
+		getGithubCopilotSignIn: builder.query<GithubCopilotSignInStatus, { provider: string; keyId: string }>({
+			query: ({ provider, keyId }) => `/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(keyId)}/sign-in`,
+			providesTags: (result, error, { keyId }) => [{ type: "GithubCopilotSignIn", id: keyId }],
+		}),
+
+		startGithubCopilotSignIn: builder.mutation<GithubCopilotDeviceCode, { provider: string; keyId: string; clientId: string }>({
+			query: ({ provider, keyId, clientId }) => ({
+				url: `/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(keyId)}/sign-in`,
+				method: "POST",
+				body: { client_id: clientId },
+			}),
+		}),
+
+		pollGithubCopilotSignIn: builder.mutation<
+			GithubCopilotSignInPollResult,
+			{ provider: string; keyId: string; clientId: string; deviceCode: string }
+		>({
+			query: ({ provider, keyId, clientId, deviceCode }) => ({
+				url: `/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(keyId)}/sign-in/poll`,
+				method: "POST",
+				body: { client_id: clientId, device_code: deviceCode },
+			}),
+			// The gateway re-checks the key once a sign-in completes, so its status and models change too.
+			invalidatesTags: (result, error, { provider, keyId }) =>
+				result?.status === "complete"
+					? [{ type: "GithubCopilotSignIn", id: keyId }, { type: "ProviderKeys", id: provider }, "Models", "DBKeys"]
+					: [],
+		}),
+
+		signOutGithubCopilotSignIn: builder.mutation<{ signed_in: boolean }, { provider: string; keyId: string }>({
+			query: ({ provider, keyId }) => ({
+				url: `/providers/${encodeURIComponent(provider)}/keys/${encodeURIComponent(keyId)}/sign-in`,
+				method: "DELETE",
+			}),
+			invalidatesTags: (result, error, { provider, keyId }) => [
+				{ type: "GithubCopilotSignIn", id: keyId },
+				{ type: "ProviderKeys", id: provider },
+				"Models",
+				"DBKeys",
+			],
 		}),
 
 		// Create new provider
@@ -556,4 +603,8 @@ export const {
 	useGetModelDetailsQuery,
 	useLazyGetModelDetailsQuery,
 	useUpsertModelCatalogEntriesMutation,
+	useGetGithubCopilotSignInQuery,
+	useStartGithubCopilotSignInMutation,
+	usePollGithubCopilotSignInMutation,
+	useSignOutGithubCopilotSignInMutation,
 } = providersApi;

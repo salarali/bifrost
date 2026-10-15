@@ -320,74 +320,35 @@ const isSecretVarMasked = (v: { value?: string; ref?: string; type?: string } | 
 	return isRedacted(value);
 };
 
-const isLiteralDigits = (v: { value?: string; ref?: string; type?: string } | undefined): boolean => {
-	if (!isSecretVarSet(v)) return true; // presence is checked separately
-	if (isSecretVarRef(v) || isSecretVarMasked(v)) return true;
-	return /^\d+$/.test((v?.value ?? "").trim());
-};
+// githubCopilotKeyConfigComplete reports whether the block signs in with GitHub, the only
+// credential it carries. The outer key schema uses it to decide whether an empty value is fine.
+export const githubCopilotKeyConfigComplete = (data: { oauth_client_id?: { value?: string; ref?: string } } | undefined): boolean =>
+	isSecretVarSet(data?.oauth_client_id);
 
-// GitHub issues App keys as PKCS#1 ("RSA PRIVATE KEY"); openssl can convert them to PKCS#8
-// ("PRIVATE KEY"). Nothing else signs an RS256 App JWT, so an EC or passphrase-encrypted key
-// is rejected here rather than at the first inference call.
-//
-// This checks the envelope only: the browser cannot parse DER. The server does the real
-// parse in validateProviderKeyURL, so this is a fast typo check, not the security boundary.
-// Literal backslash-n is tolerated because that is how a PEM most often arrives when it has
-// been round-tripped through JSON or an environment variable.
-const PEM_PRIVATE_KEY = /^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----\s*\n([\s\S]*?)\n\s*-----END \1-----$/;
-
-const isLiteralPEM = (v: { value?: string; ref?: string; type?: string } | undefined): boolean => {
+// A GitHub App client ID such as Iv1.0123abcd or Iv23liAbC; references and masks are not checked.
+const GITHUB_CLIENT_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const isLiteralGithubClientID = (v: { value?: string; ref?: string; type?: string } | undefined): boolean => {
 	if (!isSecretVarSet(v)) return true;
 	if (isSecretVarRef(v) || isSecretVarMasked(v)) return true;
-	const body = (v?.value ?? "").replace(/\\n/g, "\n").trim();
-	const match = PEM_PRIVATE_KEY.exec(body);
-	// The back-reference makes BEGIN and END agree; the body must also carry something.
-	return !!match && match[2].trim().length > 0;
+	return GITHUB_CLIENT_ID.test((v?.value ?? "").trim());
 };
 
-// githubCopilotKeyConfigComplete reports whether all four App credentials are present. It is
-// the check the outer key schema uses to decide whether this block is a real credential.
-export const githubCopilotKeyConfigComplete = (
-	data: { app_id?: unknown; installation_id?: unknown; repository_id?: unknown; private_key?: unknown } | undefined,
-): boolean => {
-	if (!data) return false;
-	const d = data as Record<string, { value?: string; ref?: string } | undefined>;
-	return isSecretVarSet(d.app_id) && isSecretVarSet(d.installation_id) && isSecretVarSet(d.repository_id) && isSecretVarSet(d.private_key);
-};
-
-// GitHub Copilot key config schema. Every field is optional because the whole block is
-// optional: a Copilot API token in `value` is the other valid auth mode. Once the operator
-// starts filling this block in, all four become required together and literals are checked
-// for shape, so a typo is caught in the form rather than at the first inference call.
+// GitHub Copilot key config schema. The block is optional: a token in `value` is the other way
+// to authenticate. The client ID is checked for shape so a typo is caught in the form.
 export const githubCopilotKeyConfigSchema = z
 	.object({
-		app_id: secretVarSchema.optional(),
-		installation_id: secretVarSchema.optional(),
-		repository_id: secretVarSchema.optional(),
-		private_key: secretVarSchema.optional(),
-		github_domain: secretVarSchema.optional(),
+		oauth_client_id: secretVarSchema.optional(),
+		// UI-only: the selected auth tab. The other tab's field stays in the form so switching back
+		// keeps it, so only the selected tab is checked. Stripped before the key is sent.
+		_auth_type: z.enum(["token", "sign_in"]).optional(),
 	})
 	.superRefine((data, ctx) => {
-		const started =
-			isSecretVarSet(data.app_id) ||
-			isSecretVarSet(data.installation_id) ||
-			isSecretVarSet(data.repository_id) ||
-			isSecretVarSet(data.private_key);
-		if (!started) return;
-
-		for (const field of ["app_id", "installation_id", "repository_id", "private_key"] as const) {
-			if (!isSecretVarSet(data[field])) {
-				ctx.addIssue({ code: "custom", path: [field], message: "Required when using GitHub App credentials" });
-			}
+		if (data._auth_type === "token") return;
+		if (data._auth_type === "sign_in" && !isSecretVarSet(data.oauth_client_id)) {
+			ctx.addIssue({ code: "custom", path: ["oauth_client_id"], message: "Client ID is required to sign in with GitHub" });
 		}
-		if (!isLiteralDigits(data.installation_id)) {
-			ctx.addIssue({ code: "custom", path: ["installation_id"], message: "Installation ID must be numeric" });
-		}
-		if (!isLiteralDigits(data.repository_id)) {
-			ctx.addIssue({ code: "custom", path: ["repository_id"], message: "Repository ID must be numeric" });
-		}
-		if (!isLiteralPEM(data.private_key)) {
-			ctx.addIssue({ code: "custom", path: ["private_key"], message: "Private key must be a PKCS#1 or PKCS#8 PEM block" });
+		if (!isLiteralGithubClientID(data.oauth_client_id)) {
+			ctx.addIssue({ code: "custom", path: ["oauth_client_id"], message: "Client ID must be the GitHub App's Client ID, e.g. Iv23li…" });
 		}
 	});
 
@@ -732,10 +693,16 @@ export const modelProviderKeySchema = z
 				}
 				return isSecretVarSet(data.value);
 			}
-			// GitHub Copilot authenticates from its own key config when no API token is given.
-			// An empty block, or one carrying only github_domain, is not a credential: the
-			// nested schema permits it so token auth stays valid, so this is the only place
-			// that catches a key with no usable authentication at all.
+			// GitHub Copilot signs in with GitHub when no token is given. An empty block is not a
+			// credential: the nested schema permits it so token auth stays valid, so this is the
+			// only place that catches a key with no usable authentication at all.
+			const copilotAuthType = data.github_copilot_key_config?._auth_type;
+			if (copilotAuthType === "token") {
+				return isSecretVarSet(data.value);
+			}
+			if (copilotAuthType === "sign_in") {
+				return true;
+			}
 			if (githubCopilotKeyConfigComplete(data.github_copilot_key_config)) {
 				return true;
 			}

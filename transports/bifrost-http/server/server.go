@@ -2953,6 +2953,7 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	oauth2ConsentHandler.RegisterRoutes(s.Router, middlewares...)
 	healthHandler.RegisterRoutes(s.Router, middlewares...)
 	providerHandler.RegisterRoutes(s.Router, middlewares...)
+	handlers.NewGithubCopilotSignInHandler(s.Config, callbacks).RegisterRoutes(s.Router, middlewares...)
 	mcpHandler.RegisterRoutes(s.Router, middlewares...)
 	if virtualMCPHandler != nil {
 		virtualMCPHandler.RegisterRoutes(s.Router, middlewares...)
@@ -3336,6 +3337,11 @@ func (s *BifrostHTTPServer) Bootstrap(ctx context.Context) error {
 			}
 			mcpConfig.InProcessServerFactory = openAPIFactory
 		}
+	}
+	// Load stored GitHub Copilot sign-ins before the client starts, so its startup model
+	// listing can use them; the manager then refreshes them until s.Ctx is cancelled.
+	if s.Config.GithubCopilotSignIn != nil {
+		s.Config.GithubCopilotSignIn.Start(s.Ctx)
 	}
 	// Initialize bifrost client
 	// Create account backed by the high-performance store (all processing is done in LoadFromDatabase)

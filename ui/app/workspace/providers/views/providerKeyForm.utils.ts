@@ -98,5 +98,18 @@ export const applyAuthMethod = (key: KeyPayload, isEditing: boolean): Record<str
 	if (!usesStaticKey && !isSet(key.value)) {
 		out.value = { value: "" };
 	}
+	applyGithubCopilotAuthMethod(out);
 	return out;
+};
+
+// applyGithubCopilotAuthMethod sends an explicit empty for the Copilot tab not chosen. The form
+// keeps both tabs' fields so switching tabs loses nothing, and the server prefers a value over a
+// sign-in, so a stored token left behind would quietly keep authenticating a sign-in key.
+const applyGithubCopilotAuthMethod = (out: Record<string, unknown>) => {
+	const block = out.github_copilot_key_config;
+	if (!block || typeof block !== "object") return;
+	const { _auth_type, ...config } = block as AuthBlock;
+	if (_auth_type === "token") config.oauth_client_id = { value: "" };
+	if (_auth_type === "sign_in") out.value = { value: "" };
+	out.github_copilot_key_config = config;
 };

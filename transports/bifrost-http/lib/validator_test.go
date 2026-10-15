@@ -3791,36 +3791,20 @@ func TestSchemaOAuthKeyConfig(t *testing.T) {
 	}
 }
 
-// TestSchemaGithubCopilotCredentialRequired pins that the schema demands one of the two
-// credential forms. core/utils.go rejects a key carrying neither, and the schema is the
-// source of truth for config fields, so it has to reject the same shape rather than
-// deferring the failure to boot.
+// TestSchemaGithubCopilotCredentialRequired pins that the schema demands a token or a
+// sign-in client ID. core/utils.go rejects a key carrying neither, and the schema is the
+// source of truth for config fields, so it has to reject the same shape.
 func TestSchemaGithubCopilotCredentialRequired(t *testing.T) {
 	compiled := compileSchema(t)
 
-	const appConfig = `"github_copilot_key_config": {
-		"app_id": "123456",
-		"installation_id": "87654321",
-		"repository_id": "999000111",
-		"private_key": "pem"
-	}`
+	const signIn = `"github_copilot_key_config": {"oauth_client_id": "Iv23liAbC"}`
 
 	valid := []struct {
 		name   string
 		config string
 	}{
-		{
-			name:   "direct token alone",
-			config: copilotKeyConfig(`"name": "k", "value": "tid=abc", "models": ["*"], "weight": 1.0`),
-		},
-		{
-			name:   "github app config alone",
-			config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0, ` + appConfig),
-		},
-		{
-			name:   "both forms together",
-			config: copilotKeyConfig(`"name": "k", "value": "tid=abc", "models": ["*"], "weight": 1.0, ` + appConfig),
-		},
+		{name: "a token alone", config: copilotKeyConfig(`"name": "k", "value": "github_pat_abc", "models": ["*"], "weight": 1.0`)},
+		{name: "a sign-in client id alone", config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0, ` + signIn)},
 	}
 	for _, tt := range valid {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3834,19 +3818,13 @@ func TestSchemaGithubCopilotCredentialRequired(t *testing.T) {
 		name   string
 		config string
 	}{
-		{
-			name:   "neither credential form",
-			config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0`),
-		},
-		{
-			name:   "empty token with no app config",
-			config: copilotKeyConfig(`"name": "k", "value": "", "models": ["*"], "weight": 1.0`),
-		},
-		{
-			name: "app config missing the private key",
-			config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0,
-				"github_copilot_key_config": {"app_id": "1", "installation_id": "2", "repository_id": "3"}`),
-		},
+		{name: "neither credential form", config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0`)},
+		{name: "an empty token and no config", config: copilotKeyConfig(`"name": "k", "value": "", "models": ["*"], "weight": 1.0`)},
+		{name: "an empty config block", config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0, "github_copilot_key_config": {}`)},
+		// GitHub App installation fields were removed; the schema refuses them so a stale
+		// config is caught by validation tooling instead of being silently ignored.
+		{name: "removed GitHub App fields", config: copilotKeyConfig(`"name": "k", "models": ["*"], "weight": 1.0,
+			"github_copilot_key_config": {"app_id": "1", "installation_id": "2", "repository_id": "3", "private_key": "pem"}`)},
 	}
 	for _, tt := range invalid {
 		t.Run(tt.name, func(t *testing.T) {
